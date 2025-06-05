@@ -340,8 +340,10 @@ class World(object):
     def tick(self, clock):
         self.hud.tick(self, clock)
 
+
     def render(self, display):
-        self.camera_manager.render(display)
+        if self.camera_manager is not None:
+            self.camera_manager.render(display)
         self.hud.render(display)
 
     def destroy_sensors(self):
@@ -350,21 +352,27 @@ class World(object):
         self.camera_manager.index = None
 
     def destroy(self):
+        if self.camera_manager is not None and self.camera_manager.sensor is not None:
+            self.camera_manager.sensor.destroy()
+            self.camera_manager.sensor = None
+            self.camera_manager.index = None
+
         if self.radar_sensor is not None:
             self.toggle_radar()
+
         sensors = [
-            self.camera_manager.sensor,
-            self.collision_sensor.sensor,
-            self.lane_invasion_sensor.sensor,
-            self.gnss_sensor.sensor,
-            self.imu_sensor.sensor]
+            self.collision_sensor.sensor if self.collision_sensor else None,
+            self.lane_invasion_sensor.sensor if self.lane_invasion_sensor else None,
+            self.gnss_sensor.sensor if self.gnss_sensor else None,
+            self.imu_sensor.sensor if self.imu_sensor else None
+        ]
         for sensor in sensors:
             if sensor is not None:
                 sensor.stop()
                 sensor.destroy()
+
         if self.player is not None:
             self.player.destroy()
-
 
 # ==============================================================================
 # -- KeyboardControl -----------------------------------------------------------
@@ -672,6 +680,7 @@ class HUD(object):
         mono = default_font if default_font in fonts else fonts[0]
         mono = pygame.font.match_font(mono)
         self._font_mono = pygame.font.Font(mono, 12 if os.name == 'nt' else 14)
+        self.speed_font = pygame.font.Font(pygame.font.get_default_font(), 24)  # Larger font for speed display
         self._notifications = FadingText(font, (width, 40), (0, height - 40))
         self.help = HelpText(pygame.font.Font(mono, 16), width, height)
         self.server_fps = 0
@@ -680,9 +689,14 @@ class HUD(object):
         self._show_info = True
         self._info_text = []
         self._server_clock = pygame.time.Clock()
+        self.speed = 0.0  # 속도 변수 추가
 
         self._show_ackermann_info = False
         self._ackermann_control = carla.VehicleAckermannControl()
+
+    def toggle_info(self):
+        """Toggle HUD info display."""
+        self._show_info = not self._show_info
 
     def on_world_tick(self, timestamp):
         self._server_clock.tick()
@@ -692,6 +706,17 @@ class HUD(object):
 
     def tick(self, world, clock):
         self._notifications.tick(world, clock)
+        self.server_fps = world.server_fps
+        self.simulation_time = world.simulation_time
+
+        # 차량 속도 계산
+        if world.player is not None:
+            velocity = world.player.get_velocity()
+            speed_mps = (velocity.x**2 + velocity.y**2 + velocity.z**2) ** 0.5  # m/s로 속도 계산
+            self.speed = speed_mps * 2.23694  # m/s를 MPH로 변환
+        else:
+            self.speed = 0.0
+
         if not self._show_info:
             return
         t = world.player.get_transform()
@@ -810,6 +835,10 @@ class HUD(object):
                 v_offset += 18
         self._notifications.render(display)
         self.help.render(display)
+        # 속도를 화면 왼쪽 하단에 표시
+        speed_text = f"{self.speed:.1f} MPH"
+        speed_surface = self.speed_font.render(speed_text, True, (255, 255, 255))
+        display.blit(speed_surface, (400, self.dim[1] - 60))  # 화면 왼쪽 하단에 배치
 
 
 # ==============================================================================
@@ -1247,9 +1276,20 @@ def game_loop(args):
 
     try:
         client = carla.Client(args.host, args.port)
-        client.set_timeout(2000.0)
+        client.set_timeout(20000.0)
+
+        # Switch to Town04 map
+        map_name = "Town12"
+        current_map = client.get_world().get_map().name
+
+        if current_map != map_name:
+            print(f"Loading map: {map_name}")
+            client.load_world(map_name)
+        else:
+            print(f"Map {map_name} is already loaded.")
 
         sim_world = client.get_world()
+        sim_world.unload_map_layer(carla.MapLayer.Buildings)
         if args.sync:
             original_settings = sim_world.get_settings()
             settings = sim_world.get_settings()
